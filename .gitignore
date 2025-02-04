@@ -3,3 +3,6 @@ outputRemote.csv
 unprepared_questions.csv
 .idea/
 **/__pycache__/
+venv
+chrome_bot
+config.yaml
