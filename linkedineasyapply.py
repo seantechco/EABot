@@ -1,4 +1,4 @@
-import time, random, csv, pyautogui, pdb, traceback, sys, os
+import time, random, csv, pyautogui, traceback, os, re
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -9,12 +9,192 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 from datetime import date, datetime
 from itertools import product
+from pypdf import PdfReader
+from openai import OpenAI
+
+class AIResponseGenerator:
+    def __init__(self, api_key, personal_info, experience, languages, resume_path, text_resume_path=None, debug=False):
+        self.personal_info = personal_info
+        self.experience = experience
+        self.languages = languages
+        self.pdf_resume_path = resume_path
+        self.text_resume_path = text_resume_path
+        self._resume_content = None
+        self._client = OpenAI(api_key=api_key) if api_key else None
+        self.debug = debug
+    @property
+    def resume_content(self):
+        if self._resume_content is None:
+            # First try to read from text resume if available
+            if self.text_resume_path:
+                try:
+                    with open(self.text_resume_path, 'r', encoding='utf-8') as f:
+                        self._resume_content = f.read()
+                        print("Successfully loaded text resume")
+                        return self._resume_content
+                except Exception as e:
+                    print(f"Could not read text resume: {str(e)}")
+
+            # Fall back to PDF resume if text resume fails or isn't available
+            try:
+                content = []
+                reader = PdfReader(self.pdf_resume_path)
+                for page in reader.pages:
+                    content.append(page.extract_text())
+                self._resume_content = "\n".join(content)
+                print("Successfully loaded PDF resume")
+            except Exception as e:
+                print(f"Could not extract text from resume PDF: {str(e)}")
+                self._resume_content = ""
+        return self._resume_content
+
+    def _build_context(self):
+        return f"""
+        Personal Information:
+        - Name: {self.personal_info['First Name']} {self.personal_info['Last Name']}
+        - Current Role: {self.experience.get('currentRole', '')}
+        - Skills: {', '.join(self.experience.keys())}
+        - Languages: {', '.join(f'{lang}: {level}' for lang, level in self.languages.items())}
+        - Professional Summary: {self.personal_info.get('MessageToManager', '')}
+
+        Resume Content (Give the greatest weight to this information, if specified):
+        {self.resume_content}
+        """
+
+    def generate_response(self, question_text, response_type="text", options=None, max_tokens=100):
+        """
+        Generate a response using OpenAI's API
+        
+        Args:
+            question_text: The application question to answer
+            response_type: "text", "numeric", or "choice"
+            options: For "choice" type, a list of tuples containing (index, text) of possible answers
+            max_tokens: Maximum length of response
+            
+        Returns:
+            - For text: Generated text response or None
+            - For numeric: Integer value or None
+            - For choice: Integer index of selected option or None
+        """
+        if not self._client:
+            return None
+            
+        try:
+            context = self._build_context()
+            
+            system_prompt = {
+                "text": "You are a helpful assistant answering job application questions professionally and concisely. Use the candidate's background information and resume to personalize responses.",
+                "numeric": "You are a helpful assistant providing numeric answers to job application questions. Based on the candidate's experience, provide a single number as your response. No explanation needed.",
+                "choice": "You are a helpful assistant selecting the most appropriate answer choice for job application questions. Based on the candidate's background, select the best option by returning only its index number. No explanation needed."
+            }[response_type]
+
+            user_content = f"Using this candidate's background and resume:\n{context}\n\nPlease answer this job application question: {question_text}"
+            if response_type == "choice" and options:
+                options_text = "\n".join([f"{idx}: {text}" for idx, text in options])
+                user_content += f"\n\nSelect the most appropriate answer by providing its index number from these options:\n{options_text}"
+
+            response = self._client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
+            
+            answer = response.choices[0].message.content.strip()
+            print(f"AI response: {answer}")  # TODO: Put logging behind a debug flag
+            
+            if response_type == "numeric":
+                # Extract first number from response
+                numbers = re.findall(r'\d+', answer)
+                if numbers:
+                    return int(numbers[0])
+                return 0
+            elif response_type == "choice":
+                # Extract the index number from the response
+                numbers = re.findall(r'\d+', answer)
+                if numbers and options:
+                    index = int(numbers[0])
+                    # Ensure index is within valid range
+                    if 0 <= index < len(options):
+                        return index
+                return None  # Return None if the index is not within the valid range
+                
+            return answer
+            
+        except Exception as e:
+            print(f"Error using AI to generate response: {str(e)}")
+            return None
+
+    def evaluate_job_fit(self, job_title, job_description):
+        """
+        Evaluate whether a job is worth applying to based on the candidate's experience and the job requirements
+        
+        Args:
+            job_title: The title of the job posting
+            job_description: The full job description text
+            
+        Returns:
+            bool: True if should apply, False if should skip
+        """
+        if not self._client:
+            return True  # Proceed with application if AI not available
+            
+        try:
+            context = self._build_context()
+            
+            system_prompt = """You are evaluating job fit for technical roles. 
+            Recommend APPLY if:
+            - Candidate meets 65 percent of the core requirements
+            - Experience gap is 2 years or less
+            - Has relevant transferable skills
+            
+            Return SKIP if:
+            - Experience gap is greater than 2 years
+            - Missing multiple core requirements
+            - Role is clearly more senior
+            - The role is focused on an uncommon technology or skill that is required and that the candidate does not have experience with
+            - The role is a leadership role or a role that requires managing people and the candidate has no experience leading or managing people
+
+            """
+            #Consider the candidate's education level when evaluating whether they meet the core requirements. Having higher education than required should allow for greater flexibility in the required experience.
+            
+            if self.debug:
+                system_prompt += """
+                You are in debug mode. Return a detailed explanation of your reasoning for each requirement.
+
+                Return APPLY or SKIP followed by a brief explanation.
+
+                Format response as: APPLY/SKIP: [brief reason]"""
+            else:
+                system_prompt += """Return only APPLY or SKIP."""
+
+            response = self._client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Job: {job_title}\n{job_description}\n\nCandidate:\n{context}"}
+                ],
+                max_tokens=250 if self.debug else 1,  # Allow more tokens when debug is enabled
+                temperature=0.2  # Lower temperature for more consistent decisions
+            )
+            
+            answer = response.choices[0].message.content.strip()
+            print(f"AI evaluation: {answer}")
+            return answer.upper().startswith('A')  # True for APPLY, False for SKIP
+            
+        except Exception as e:
+            print(f"Error evaluating job fit: {str(e)}")
+            return True  # Proceed with application if evaluation fails
 
 class LinkedinEasyApply:
     def __init__(self, parameters, driver):
         self.browser = driver
         self.email = parameters['email']
         self.password = parameters['password']
+        self.openai_api_key = parameters.get('openaiApiKey', '')  # Get API key with empty default
         self.disable_lock = parameters['disableAntiLock']
         self.company_blacklist = parameters.get('companyBlacklist', []) or []
         self.title_blacklist = parameters.get('titleBlacklist', []) or []
@@ -28,6 +208,7 @@ class LinkedinEasyApply:
         self.unprepared_questions_file_name = "unprepared_questions"
         self.output_file_directory = parameters['outputFileDirectory']
         self.resume_dir = parameters['uploads']['resume']
+        self.text_resume = parameters.get('textResume', '')
         if 'coverLetter' in parameters['uploads']:
             self.cover_letter_dir = parameters['uploads']['coverLetter']
         else:
@@ -41,6 +222,17 @@ class LinkedinEasyApply:
         self.personal_info = parameters.get('personalInfo', [])
         self.eeo = parameters.get('eeo', [])
         self.experience_default = int(self.experience['default'])
+        self.debug = parameters.get('debug', False)
+        self.evaluate_job_fit = parameters.get('evaluateJobFit', True)
+        self.ai_response_generator = AIResponseGenerator(
+            api_key=self.openai_api_key,
+            personal_info=self.personal_info,
+            experience=self.experience,
+            languages=self.languages,
+            resume_path=self.resume_dir,
+            text_resume_path=self.text_resume,
+            debug=self.debug
+        )
 
     def login(self):
         try:
@@ -95,7 +287,7 @@ class LinkedinEasyApply:
         random.shuffle(searches)
 
         page_sleep = 0
-        minimum_time = 60 * 15  # minimum time bot should run before taking a break
+        minimum_time = 60 * 2  # minimum time bot should run before taking a break
         minimum_page_time = time.time() + minimum_time
 
         for (position, location) in searches:
@@ -163,6 +355,9 @@ class LinkedinEasyApply:
             raise Exception("Nothing to do here, moving forward...")
 
         try:
+            # TODO: Can we simply use class name scaffold-layout__list for the scroll (necessary to show all li in the dom?)? Does it need to be the ul within the scaffold list?
+            #      Then we can simply get all the li scaffold-layout__list-item elements within it for the jobs
+
             # Define the XPaths for potentially different regions
             xpath_region1 = "/html/body/div[6]/div[3]/div[4]/div/div/main/div/div[2]/div[1]/div"
             xpath_region2 = "/html/body/div[5]/div[3]/div[4]/div/div/main/div/div[2]/div[1]/div"
@@ -198,10 +393,10 @@ class LinkedinEasyApply:
 
             # Find job list elements
             job_list = self.browser.find_elements(By.CLASS_NAME, ul_element_class)[0].find_elements(By.CLASS_NAME, 'scaffold-layout__list-item')
-            print(f"List of jobs: {job_list}")
+            print(f"Found {len(job_list)} jobs on this page")
 
             if len(job_list) == 0:
-                raise Exception("No more jobs on this page.")
+                raise Exception("No more jobs on this page.")  # TODO: Seemed to encounter an error where we ran out of jobs and didn't go to next page, perhaps because I didn't have scrolling on?
 
         except NoSuchElementException:
             print("No job results found using the specified XPaths or class.")
@@ -256,19 +451,38 @@ class LinkedinEasyApply:
                     poster.lower() not in [word.lower() for word in self.poster_blacklist] and \
                     contains_blacklisted_keywords is False and link not in self.seen_jobs:
                 try:
+                    # Click the job to load description
                     max_retries = 3
                     retries = 0
                     while retries < max_retries:
                         try:
+                            # TODO: This is throwing an exception when running out of jobs on a page
                             job_el = job_tile.find_element(By.CLASS_NAME, 'job-card-list__title--link')
                             job_el.click()
                             break
-
                         except StaleElementReferenceException:
                             retries += 1
                             continue
 
                     time.sleep(random.uniform(3, 5))
+
+                    # TODO: Check if the job is already applied or the application has been reached
+                    # "You’ve reached the Easy Apply application limit for today. Save this job and come back tomorrow to continue applying."
+                    # Do this before evaluating job fit to save on API calls
+
+                    if self.evaluate_job_fit:
+                        try:
+                            # Get job description
+                            job_description = self.browser.find_element(
+                                By.ID, 'job-details'
+                            ).text  
+
+                            # Evaluate if we should apply
+                            if not self.ai_response_generator.evaluate_job_fit(job_title, job_description):
+                                print("Skipping application: Job requirements not aligned with candidate profile per AI evaluation.")
+                                continue
+                        except:
+                            print("Could not load job description")
 
                     try:
                         done_applying = self.apply_to_job()
@@ -311,7 +525,7 @@ class LinkedinEasyApply:
             return False
 
         try:
-            job_description_area = self.browser.find_element(By.CLASS_NAME, "jobs-search__job-details--container")
+            job_description_area = self.browser.find_element(By.ID, "job-details")
             print (f"{job_description_area}")
             self.scroll_slow(job_description_area, end=1600)
             self.scroll_slow(job_description_area, end=1600, step=400, reverse=True)
@@ -443,19 +657,20 @@ class LinkedinEasyApply:
                 radio_fieldset = question.find_element(By.TAG_NAME, 'fieldset')
                 question_span = radio_fieldset.find_element(By.CLASS_NAME, 'fb-dash-form-element__label').find_elements(By.TAG_NAME, 'span')[0]
                 radio_text = question_span.text.lower()
-                print(f"Radio question text: {radio_text}")  # TODO: Put logging behind debug flag
+                print(f"Radio question text: {radio_text}")
 
                 radio_labels = radio_fieldset.find_elements(By.TAG_NAME, 'label')
-                radio_options = [text.text.lower() for text in radio_labels]
-                print(f"radio options: {radio_options}")  # TODO: Put logging behind debug flag
+                radio_options = [(i, text.text.lower()) for i, text in enumerate(radio_labels)]
+                print(f"radio options: {[opt[1] for opt in radio_options]}")
+                
                 if len(radio_options) == 0:
                     raise Exception("No radio options found in question")
 
-                answer = "yes"
+                answer = None
 
+                # Try to determine answer using existing logic
                 if 'driver\'s licence' in radio_text or 'driver\'s license' in radio_text:
                     answer = self.get_answer('driversLicence')
-
                 elif any(keyword in radio_text.lower() for keyword in
                          [
                              'Aboriginal', 'native', 'indigenous', 'tribe', 'first nations',
@@ -466,7 +681,7 @@ class LinkedinEasyApply:
                          ]):
                     negative_keywords = ['prefer', 'decline', 'don\'t', 'specified', 'none', 'no']
                     answer = next((option for option in radio_options if
-                                   any(neg_keyword in option.lower() for neg_keyword in negative_keywords)), None)
+                                   any(neg_keyword in option[1].lower() for neg_keyword in negative_keywords)), None)
 
                 elif 'assessment' in radio_text:
                     answer = self.get_answer("assessment")
@@ -512,37 +727,52 @@ class LinkedinEasyApply:
                             break
 
                 elif 'experience' in radio_text:
-                    for experience in self.experience:
-                        if experience.lower() in radio_text:
-                            answer = "yes"
-                            break
+                    if self.experience_default > 0:
+                        answer = 'yes'
+                    else:
+                        for experience in self.experience:
+                            if experience.lower() in radio_text:
+                                answer = "yes"
+                                break
 
                 elif 'data retention' in radio_text:
                     answer = 'no'
 
                 elif 'sponsor' in radio_text:
                     answer = self.get_answer('requireVisa')
-                else:
-                    answer = radio_options[len(radio_options) - 1]
-                    self.record_unprepared_question("radio", radio_text)
-
-                print(f"Choosing answer: {answer}")  # TODO: Put logging behind debug flag
-                i = 0
+                
                 to_select = None
-                for radio in radio_labels:
-                    if answer in radio.text.lower():
-                        to_select = radio_labels[i]
-                    i += 1
+                if answer is not None:
+                    print(f"Choosing answer: {answer}")
+                    i = 0
+                    for radio in radio_labels:
+                        if answer in radio.text.lower():
+                            to_select = radio_labels[i]
+                            break
+                        i += 1
+                    if to_select is None:
+                        print("Answer not found in radio options")
 
                 if to_select is None:
-                    to_select = radio_labels[len(radio_labels) - 1]
+                    print("No answer determined")
+                    self.record_unprepared_question("radio", radio_text)
 
+                    # Since no response can be determined, we use AI to identify the best responseif available, falling back to the final option if the AI response is not available
+                    ai_response = self.ai_response_generator.generate_response(
+                        question_text,
+                        response_type="choice",
+                        options=radio_options
+                    )
+                    if ai_response is not None:
+                        to_select = radio_labels[ai_response]
+                    else:
+                        to_select = radio_labels[len(radio_labels) - 1]
                 to_select.click()
 
                 if radio_labels:
                     continue
-            except:
-                print("An exception occurred while filling up radio field")  # TODO: Put logging behind debug flag
+            except Exception as e:
+                print("An exception occurred while filling up radio field")
 
             # Questions check
             try:
@@ -560,10 +790,10 @@ class LinkedinEasyApply:
                     except:
                         raise Exception("Could not find textarea or input tag for question")
 
-                text_field_type = txt_field.get_attribute('type').lower()
-                if 'numeric' in text_field_type:  # TODO: test numeric type
+                if 'numeric' in txt_field.get_attribute('id').lower():
+                    # For decimal and integer response fields, the id contains 'numeric' while the type remains 'text' 
                     text_field_type = 'numeric'
-                elif 'text' in text_field_type:
+                elif 'text' in txt_field.get_attribute('type').lower():
                     text_field_type = 'text'
                 else:
                     raise Exception("Could not determine input type of input field!")
@@ -620,11 +850,20 @@ class LinkedinEasyApply:
                         to_enter = float(self.salary_minimum)
                     self.record_unprepared_question(text_field_type, question_text)
 
+                # Since no response can be determined, we use AI to generate a response if available, falling back to 0 or empty string if the AI response is not available
                 if text_field_type == 'numeric':
                     if not isinstance(to_enter, (int, float)):
-                        to_enter = 0
+                        ai_response = self.ai_response_generator.generate_response(
+                            question_text,
+                            response_type="numeric"
+                        )
+                        to_enter = ai_response if ai_response is not None else 0
                 elif to_enter == '':
-                    to_enter = " ‏‏‎ "
+                    ai_response = self.ai_response_generator.generate_response(
+                        question_text,
+                        response_type="text"
+                    )
+                    to_enter = ai_response if ai_response is not None else " ‏‏‎ "
 
                 self.enter_text(txt_field, to_enter)
                 continue
@@ -817,10 +1056,13 @@ class LinkedinEasyApply:
 
                 elif 'experience' in question_text or 'understanding' in question_text or 'familiar' in question_text or 'comfortable' in question_text or 'able to' in question_text:
                     answer = 'no'
-                    for experience in self.experience:
-                        if experience.lower() in question_text and self.experience[experience] > 0:
-                            answer = 'yes'
-                            break
+                    if self.experience_default > 0:
+                        answer = 'yes'
+                    else:
+                        for experience in self.experience:
+                            if experience.lower() in question_text and self.experience[experience] > 0:
+                                answer = 'yes'
+                                break
                     if answer == 'no':
                         # record unlisted experience as unprepared questions
                         self.record_unprepared_question("dropdown", question_text)
@@ -834,14 +1076,27 @@ class LinkedinEasyApply:
                     self.select_dropdown(dropdown_field, choice)
 
                 else:
-                    choice = ""
-                    for option in options:
-                        if 'yes' in option.lower():
-                            choice = option
-                    if choice == "":
-                        choice = options[len(options) - 1]
-                    self.select_dropdown(dropdown_field, choice)
+                    print(f"Unhandled dropdown question: {question_text}")
                     self.record_unprepared_question("dropdown", question_text)
+
+                    # Since no response can be determined, we use AI to identify the best responseif available, falling back "yes" or the final response if the AI response is not available
+                    choice = options[len(options) - 1]
+                    choices = [(i, option) for i, option in enumerate(options)]
+                    ai_response = self.ai_response_generator.generate_response(
+                        question_text,
+                        response_type="choice",
+                        options=choices
+                    )
+                    if ai_response is not None:
+                        choice = options[ai_response]
+                    else:
+                        choice = ""
+                        for option in options:
+                            if 'yes' in option.lower():
+                                choice = option
+
+                    print(f"Selected option: {choice}")
+                    self.select_dropdown(dropdown_field, choice)
                 continue
             except:
                 print("An exception occurred while filling up dropdown field")  # TODO: Put logging behind debug flag
@@ -973,7 +1228,7 @@ class LinkedinEasyApply:
 
         for i in range(start, end, step):
             self.browser.execute_script("arguments[0].scrollTo(0, {})".format(i), scrollable_element)
-            time.sleep(random.uniform(1.0, 2.6))
+            time.sleep(random.uniform(0.1, .6))
 
     def avoid_lock(self):
         if self.disable_lock:
@@ -988,6 +1243,7 @@ class LinkedinEasyApply:
     def get_base_search_url(self, parameters):
         remote_url = ""
         lessthanTenApplicants_url = ""
+        newestPostingsFirst_url = ""
 
         if parameters.get('remote'):
             remote_url = "&f_WT=2"
@@ -997,6 +1253,9 @@ class LinkedinEasyApply:
 
         if parameters['lessthanTenApplicants']:
             lessthanTenApplicants_url = "&f_EA=true"
+
+        if parameters['newestPostingsFirst']:
+            newestPostingsFirst_url += "&sortBy=DD"
 
         level = 1
         experience_level = parameters.get('experienceLevel', [])
@@ -1025,7 +1284,7 @@ class LinkedinEasyApply:
 
         easy_apply_url = "&f_AL=true"
 
-        extra_search_terms = [distance_url, remote_url, lessthanTenApplicants_url, job_types_url, experience_url]
+        extra_search_terms = [distance_url, remote_url, lessthanTenApplicants_url, newestPostingsFirst_url, job_types_url, experience_url]
         extra_search_terms_str = '&'.join(
             term for term in extra_search_terms if len(term) > 0) + easy_apply_url + date_url
 

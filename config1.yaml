@@ -2,9 +2,6 @@
 email: email@domain.com
 password: yourpassword
 
-# OpenAI API key for answering application questions when no answer can be determined using the information below. WARNING: KEEP THIS OFFLINE AND DO NOT COMMIT/UPLOAD.
-openaiApiKey: sk-proj-your-openai-api-key
-
 # Anti-lock default is False to prevent your PC from sleeping to allow bot to run uninterrupted.
 # Set it to True if you wish to disable this functionality.
 disableAntiLock: False
@@ -14,9 +11,6 @@ remote: False
 
 # Set to True if you wish to search for jobs marked as "under 10 applicants" (default is False).
 lessthanTenApplicants: False
-
-# Set to True to sort by date posted, False to sort by relevance
-newestPostingsFirst: False
 
 # Set to True or False to suit your preference. Multiple True allowed.
 experienceLevel:
@@ -235,12 +229,3 @@ eeo:
  disability: None
  citizenship: yes
  clearance: no
-
-# Evaluate job fit for each job posting using OpenAI, if OpenAI API Key is configured.
-evaluateJobFit: False
-
-# Path to the text version of your resume, used to extract text from the resume for AI evaluation of job fit, used if OpenAI API Key is configured and evaluateJobFit is True.
-textResume: /home/michael/Documents/Applications/Resume/resume_export.txt
-
-# Debugging mode, used to print more information to the console and fetch more information in AI responses
-debug: False

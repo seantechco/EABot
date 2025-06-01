@@ -44,6 +44,7 @@ def validate_yaml():
                         'disableAntiLock',
                         'remote',
                         'lessthanTenApplicants',
+                        'newestPostingsFirst',
                         'experienceLevel',
                         'jobTypes',
                         'date',
@@ -69,6 +70,7 @@ def validate_yaml():
     assert isinstance(parameters['disableAntiLock'], bool)
     assert isinstance(parameters['remote'], bool)
     assert isinstance(parameters['lessthanTenApplicants'], bool)
+    assert isinstance(parameters['newestPostingsFirst'], bool)
     assert isinstance(parameters['residentStatus'], bool)
     assert len(parameters['experienceLevel']) > 0
     experience_level = parameters.get('experienceLevel', [])
@@ -134,6 +136,11 @@ def validate_yaml():
     eeo = parameters.get('eeo', [])
     for survey_question in eeo:
         assert eeo[survey_question] != ''
+
+    if parameters.get('openaiApiKey') == 'sk-proj-your-openai-api-key':
+        # Overwrite the default value with None to indicate internally that the OpenAI API key is not configured
+        print("OpenAI API key not configured. Defaulting to empty responses for text fields.")
+        parameters['openaiApiKey'] = None
 
     return parameters
 
