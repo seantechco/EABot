@@ -8,3 +8,8 @@ chrome_bot/
 failed.csv
 output.csv
 venv
+chrome_bot
+config.yaml
+config1.yaml
+failed.csv
+output.csv
