@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  linkedin-bot:
+    build: .
+    # Increase shared memory size for the container
+    shm_size: '2gb'
+    volumes:
+      # Mount the config file so you can change it without rebuilding the image
+      - ./config.yaml:/app/config.yaml
+      # Mount the chrome_bot directory to persist your session data across container runs
+      - ./chrome_bot:/app/chrome_bot

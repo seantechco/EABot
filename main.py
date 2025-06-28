@@ -8,33 +8,32 @@ from linkedineasyapply import LinkedinEasyApply
 
 def init_browser():
     browser_options = Options()
-    options = [
-        '--disable-blink-features',
-        '--no-sandbox',
-        '--start-maximized',
-        '--disable-extensions',
-        '--ignore-certificate-errors',
-        '--disable-blink-features=AutomationControlled',
-        '--remote-debugging-port=9222'
-    ]
+    browser_options.binary_location = "/usr/bin/google-chrome"
 
-    # This is important for running in a container
-    # The display number must match the one in entrypoint.sh
-    os.environ['DISPLAY'] = ':99' 
+    # Using older headless flag and adding zygote disable
+    browser_options.add_argument("--headless")
+    browser_options.add_argument("--no-sandbox")
+    browser_options.add_argument("--disable-setuid-sandbox")
+    browser_options.add_argument("--disable-zygote") # Add this flag
 
-    # Restore session if possible (avoids login everytime)
+    # Standard options
+    browser_options.add_argument("--disable-dev-shm-usage")
+    browser_options.add_argument("--disable-gpu")
+    browser_options.add_argument("--window-size=1920,1080")
+
+    # Other options
+    browser_options.add_argument("--disable-blink-features=AutomationControlled")
+    browser_options.add_argument("--disable-extensions")
+    browser_options.add_argument("--ignore-certificate-errors")
+    browser_options.add_argument("--remote-debugging-port=9222")
+
+    # Persist session data
     user_data_dir = os.path.join(os.getcwd(), "chrome_bot")
     browser_options.add_argument(f"user-data-dir={user_data_dir}")
 
-    for option in options:
-        browser_options.add_argument(option)
-
-    # Point directly to the chromedriver installed in the Docker image
     service = Service(executable_path='/usr/bin/chromedriver')
     driver = webdriver.Chrome(service=service, options=browser_options)
-    driver.implicitly_wait(1)
-    driver.set_window_position(0, 0)
-    driver.maximize_window()
+
     return driver
 
 def validate_yaml():

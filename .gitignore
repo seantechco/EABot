@@ -5,6 +5,7 @@ unprepared_questions.csv
 **/__pycache__/
 chrome_bot/
 .vscode/
+logs/
 failed.csv
 output.csv
 venv
