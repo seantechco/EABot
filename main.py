@@ -18,6 +18,10 @@ def init_browser():
         '--remote-debugging-port=9222'
     ]
 
+    # This is important for running in a container
+    # The display number must match the one in entrypoint.sh
+    os.environ['DISPLAY'] = ':99' 
+
     # Restore session if possible (avoids login everytime)
     user_data_dir = os.path.join(os.getcwd(), "chrome_bot")
     browser_options.add_argument(f"user-data-dir={user_data_dir}")
@@ -25,9 +29,10 @@ def init_browser():
     for option in options:
         browser_options.add_argument(option)
 
-    service = Service(ChromeDriverManager().install())
+    # Point directly to the chromedriver installed in the Docker image
+    service = Service(executable_path='/usr/bin/chromedriver')
     driver = webdriver.Chrome(service=service, options=browser_options)
-    driver.implicitly_wait(1)  # Wait time in seconds to allow loading of elements
+    driver.implicitly_wait(1)
     driver.set_window_position(0, 0)
     driver.maximize_window()
     return driver
